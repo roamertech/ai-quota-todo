@@ -19,6 +19,15 @@ const day = atom({ plugin: 'ai-quota-todo', key: 'day' } as const, null as Day |
 // arrive after Enter, and a value drawn back would put the text back in.
 const entry = atom({ plugin: 'ai-quota-todo', key: 'entry' } as const, 0)
 const showDone = atom({ plugin: 'ai-quota-todo', key: 'showDone' } as const, false)
+// A remove or a clear waits for a second press: the row (or 'clear-done') asked about.
+const confirming = atom({ plugin: 'ai-quota-todo', key: 'confirming' } as const, null as string | null)
+const CLEAR_DONE = 'clear-done'
+
+const rowId = (todo: Todo) => `${todo.line}:${todo.text}`
+
+function ask($: EngineInterface, id: string | null) {
+  return update($, confirming, () => id)
+}
 
 const pad = (n: number) => String(n).padStart(2, '0')
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
@@ -98,7 +107,8 @@ const sameItem = (raw: string | undefined, todo: Todo) => {
   return match !== null && (match[4] ?? '').trim() === todo.text
 }
 
-function toggle($: EngineInterface, todo: Todo) {
+async function toggle($: EngineInterface, todo: Todo) {
+  await ask($, null)
   return editFile($, lines =>
     lines.map((raw, i) =>
       i === todo.line && sameItem(raw, todo)
@@ -108,7 +118,8 @@ function toggle($: EngineInterface, todo: Todo) {
   )
 }
 
-function remove($: EngineInterface, todo: Todo) {
+async function remove($: EngineInterface, todo: Todo) {
+  await ask($, null)
   return editFile($, lines => lines.filter((raw, i) => !(i === todo.line && sameItem(raw, todo))))
 }
 
@@ -120,11 +131,13 @@ function add($: EngineInterface, text: string) {
   })
 }
 
-function clearDone($: EngineInterface, done: Todo[]) {
+async function clearDone($: EngineInterface, done: Todo[]) {
+  await ask($, null)
   return editFile($, lines => lines.filter((raw, i) => !done.some(todo => todo.line === i && sameItem(raw, todo))))
 }
 
 async function submit($: EngineInterface, text: string) {
+  await ask($, null)
   await update($, entry, n => n + 1)
   const trimmed = text.trim()
   if (trimmed) await add($, trimmed)
@@ -160,6 +173,7 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
   const current = await read($, day)
   const added = await read($, entry)
   const isShowingDone = await read($, showDone)
+  const pending = await read($, confirming)
   const todos = current?.todos ?? []
   const open = todos.filter(todo => !todo.isDone)
   const done = todos.filter(todo => todo.isDone)
@@ -171,7 +185,15 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
           {todo.isDone ? '☑' : '☐'} {todo.isDone ? <Text dimColor strikethrough>{todo.text}</Text> : todo.text}
         </Button>
       </Box>
-      <Button key={`remove-${todo.line}`} plain dimColor label="✕" onPress={() => remove($, todo)} />
+      {pending === rowId(todo) ? (
+        <Box flexDirection="row" gap={1}>
+          <Text color="warning">刪除？</Text>
+          <Button key={`confirm-${todo.line}`} plain label="確定刪除" onPress={() => remove($, todo)} />
+          <Button key={`cancel-${todo.line}`} plain dimColor label="取消" onPress={() => ask($, null)} />
+        </Box>
+      ) : (
+        <Button key={`remove-${todo.line}`} plain dimColor label="✕" onPress={() => ask($, rowId(todo))} />
+      )}
     </Box>
   )
 
@@ -209,7 +231,16 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
             <Button key="show-done" plain dimColor onPress={() => update($, showDone, shown => !shown)}>
               {isShowingDone ? '▾' : '▸'} 已完成 {done.length} 項
             </Button>
-            {isShowingDone && <Button key="clear-done" plain dimColor label="清除已完成" onPress={() => clearDone($, done)} />}
+            {isShowingDone &&
+              (pending === CLEAR_DONE ? (
+                <Box flexDirection="row" gap={1}>
+                  <Text color="warning">清除 {done.length} 項？</Text>
+                  <Button key="confirm-clear" plain label="確定清除" onPress={() => clearDone($, done)} />
+                  <Button key="cancel-clear" plain dimColor label="取消" onPress={() => ask($, null)} />
+                </Box>
+              ) : (
+                <Button key="clear-done" plain dimColor label="清除已完成" onPress={() => ask($, CLEAR_DONE)} />
+              ))}
           </Box>
           {isShowingDone && done.map(row)}
         </Box>

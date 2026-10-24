@@ -49,17 +49,29 @@ test('open items first, the field clears after Enter, finished items fold away',
   expect(await ui.find({ type: 'Input', key: 'new-0' })).toBeUndefined()
   expect((await ui.find({ type: 'Input', key: 'new-1' }))?.text ?? '').toBe('')
 
+  // ✕ only asks; the item goes on the second press, and 取消 keeps it.
+  await $.ui.press({ plugin: 'ai-quota-todo', key: 'remove-4' })
+  expect(files[PATH]).toContain('買咖啡')
+  await $.ui.press({ plugin: 'ai-quota-todo', key: 'cancel-4' })
+  expect(await ui.find({ type: 'Button', key: 'confirm-4' })).toBeUndefined()
+  expect(files[PATH]).toContain('買咖啡')
+  await $.ui.press({ plugin: 'ai-quota-todo', key: 'remove-4' })
+  await $.ui.press({ plugin: 'ai-quota-todo', key: 'confirm-4' })
+  expect(files[PATH]).not.toContain('買咖啡')
+
   await $.ui.press({ plugin: 'ai-quota-todo', key: 'show-done' })
   expect(await ui.find({ type: 'Button', text: /回信/ })).toBeDefined()
 
   await $.ui.press({ plugin: 'ai-quota-todo', key: 'clear-done' })
+  expect(files[PATH]).toContain('回信')
+  await $.ui.press({ plugin: 'ai-quota-todo', key: 'confirm-clear' })
   expect(files[PATH]).not.toContain('回信')
   expect(files[PATH]).toContain('- [ ] 寫企劃')
   await ui.unmount()
 
   for (const surface of ['terminal', 'vscode', 'mobile'] as const) {
     const other = await $.ui.mount({ ...PANE, surface })
-    expect((await other.find({ type: 'Text', text: /完成/ }))?.text).toBe('完成 0/2')
+    expect((await other.find({ type: 'Text', text: /完成/ }))?.text).toBe('完成 0/1')
     await other.unmount()
   }
 })

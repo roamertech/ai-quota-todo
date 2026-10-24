@@ -28,6 +28,7 @@ declare module 'claude-code' {
       day: Day | null
       entry: number
       showDone: boolean
+      confirming: string | null
     }
   }
 }
