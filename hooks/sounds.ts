@@ -18,15 +18,23 @@ const ASKING_NOTICES = new Set(['permission_prompt', 'elicitation_dialog'])
 const QUIET_MS = 3000
 let lastAsk = 0
 
-function play($: EngineInterface, asset: string) {
-  void $.audio.play({ asset }).catch(() => {})
+// $.audio.play has no player on Windows, so there PowerShell's SoundPlayer plays the file.
+async function play($: EngineInterface, asset: string) {
+  if ((await $.env.get('OS')) === 'Windows_NT') {
+    const path = `${$.plugin.root}/${asset}`.replace(/'/g, "''")
+    await $.process
+      .run(['powershell', '-NoProfile', '-Command', `(New-Object System.Media.SoundPlayer '${path}').PlaySync()`])
+      .catch(() => {})
+    return
+  }
+  await $.audio.play({ asset }).catch(() => {})
 }
 
 async function askSound($: EngineInterface) {
   const now = await $.clock.now()
   if (now - lastAsk < QUIET_MS) return
   lastAsk = now
-  play($, 'sounds/ask.wav')
+  void play($, 'sounds/ask.wav')
 }
 
 export function registerSounds(on: On) {
@@ -35,7 +43,7 @@ export function registerSounds(on: On) {
     const isChimed = (await $.clock.now()) - lastAsk < CHIME_COVERS_MS
 
     if (e.agentId === undefined && (e.reason === 'error' || (e.reason === 'answer' && !isChimed))) {
-      play($, e.reason === 'answer' ? 'sounds/ding.wav' : 'sounds/fail.wav')
+      void play($, e.reason === 'answer' ? 'sounds/ding.wav' : 'sounds/fail.wav')
     }
 
     return done
