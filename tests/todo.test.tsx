@@ -152,3 +152,60 @@ test('items group under their ## / ### heading, a heading folds, new items stay 
   expect(files[PATH]?.trimEnd().endsWith('- [x] 已寄出')).toBe(true)
   await ui.unmount()
 })
+
+test("a new day carries the last day's open items over under their headings", async ($, on) => {
+  const files: Record<string, string> = {
+    [`${DIR}/2026-10-24.md`]: [
+      '# 2026-10-24 每日待辦',
+      '',
+      '- [ ] 散的一項',
+      '- [x] 做完的散項',
+      '',
+      '## 工作快照',
+      '說明文字',
+      '',
+      '### 一、近期',
+      '- [ ] 跟進報價',
+      '- [x] 已寄簡報',
+      '',
+      '### 二、全做完了',
+      '- [x] 已回信',
+      '',
+      '### 三、等待回覆',
+      '- [ ] 等客戶回信',
+      '',
+    ].join('\n'),
+  }
+  mock.env(on, { HOME: '/home/u' })
+  mock.clock(on, { now: new Date(2026, 9, 25, 9).getTime() })
+  mock.store(on)
+  on('fs.exists', (_, e) => ({ value: norm(e.path) in files || norm(e.path) === DIR }))
+  on('fs.read', (_, e) => (norm(e.path) in files ? { value: files[norm(e.path)] ?? '' } : { deny: 'no such file' }))
+  on('fs.write', (_, e) => {
+    files[norm(e.path)] = e.text
+    return { value: undefined }
+  })
+  on('fs.list', () => ({
+    value: Object.keys(files).map(path => ({ name: path.slice(DIR.length + 1), kind: 'file' as const, mtimeMs: 0 })),
+  }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('http.fetch', () => ({ deny: 'offline' }))
+  on('session.authorize', () => ({ value: undefined }))
+
+  await $.command.run({ command: 'quota', args: '', origin: 'user' } as never)
+
+  expect(files[PATH]).toBe(
+    [
+      '# 2026-10-25 每日待辦',
+      '',
+      '- [ ] 散的一項',
+      '',
+      '### 一、近期',
+      '- [ ] 跟進報價',
+      '',
+      '### 三、等待回覆',
+      '- [ ] 等客戶回信',
+      '',
+    ].join('\n'),
+  )
+})

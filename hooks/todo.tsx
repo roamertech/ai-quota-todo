@@ -96,7 +96,8 @@ const parse = (text: string): Todo[] => {
   })
 }
 
-// Creates today's file on first use, carrying over what the latest earlier day left undone.
+// Creates today's file on first use, carrying over what the latest earlier
+// day left undone: loose items first, then each heading (as `###`) with its own.
 async function ensureToday($: EngineInterface, dir: string, date: string) {
   const path = `${dir}/${date}.md`
   if (await $.fs.exists(path)) return path
@@ -109,7 +110,14 @@ async function ensureToday($: EngineInterface, dir: string, date: string) {
   const carried = earlier
     ? parse(await $.fs.read(`${dir}/${earlier}`)).filter(todo => !todo.isDone)
     : []
-  const lines = [`# ${date} 每日待辦`, '', ...carried.map(todo => `- [ ] ${todo.text}`)]
+  const item = (todo: Todo) => `- [ ] ${todo.text}`
+  const sections = [...new Set(carried.flatMap(todo => (todo.section ? [todo.section] : [])))]
+  const body = [
+    ...carried.filter(todo => !todo.section).map(item),
+    ...sections.flatMap(name => ['', `### ${name}`, ...carried.filter(todo => todo.section === name).map(item)]),
+  ]
+  if (body[0] === '') body.shift()
+  const lines = [`# ${date} 每日待辦`, '', ...body]
   await $.fs.write(path, `${lines.join('\n')}\n`)
 
   return path
