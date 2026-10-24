@@ -12,6 +12,8 @@ import type { Change, Day, Todo } from '../types'
 
 const POLL_MS = 3000
 const ITEM = /^(\s*[-*]\s+\[)([ xX])(\]\s?)(.*)$/
+const HEADING = /^#{2,6}\s+(.*)$/
+const FOLDED_KEY = 'folded'
 
 const day = atom({ plugin: 'ai-quota-todo', key: 'day' } as const, null as Day | null)
 // Counts items added from the pane. The new-item field's key carries it, so
@@ -19,6 +21,8 @@ const day = atom({ plugin: 'ai-quota-todo', key: 'day' } as const, null as Day |
 // arrive after Enter, and a value drawn back would put the text back in.
 const entry = atom({ plugin: 'ai-quota-todo', key: 'entry' } as const, 0)
 const showDone = atom({ plugin: 'ai-quota-todo', key: 'showDone' } as const, false)
+// The headings whose items are folded away; kept across sessions in $.store.
+const folded = atom({ plugin: 'ai-quota-todo', key: 'folded' } as const, [] as string[])
 // A remove or a clear waits for a second press: the row (or 'clear-done') asked about.
 const confirming = atom({ plugin: 'ai-quota-todo', key: 'confirming' } as const, null as string | null)
 const CLEAR_DONE = 'clear-done'
@@ -39,6 +43,11 @@ const short = (text: string) => (text.length > 12 ? `${text.slice(0, 12)}…` : 
 async function ask($: EngineInterface, id: string | null) {
   await update($, editing, () => null)
   await update($, confirming, () => id)
+}
+
+async function fold($: EngineInterface, section: string) {
+  await update($, folded, list => (list.includes(section) ? list.filter(name => name !== section) : [...list, section]))
+  await $.store.set(FOLDED_KEY, await read($, folded))
 }
 
 async function startEdit($: EngineInterface, todo: Todo) {
@@ -67,12 +76,25 @@ async function todoDir($: EngineInterface) {
   return `${(await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? '~'}/todo`
 }
 
-const parse = (text: string): Todo[] =>
-  text.split('\n').flatMap((raw, line) => {
-    const match = ITEM.exec(raw.replace(/\r$/, ''))
+// Each item, under the nearest `##`/`###` heading above it, if any (the
+// `#` title line is not one).
+const parse = (text: string): Todo[] => {
+  let section: string | undefined
 
-    return match ? [{ line, text: (match[4] ?? '').trim(), isDone: match[2] !== ' ' }] : []
+  return text.split('\n').flatMap((raw, line) => {
+    const clean = raw.replace(/\r$/, '')
+    const heading = HEADING.exec(clean)
+    if (heading) {
+      section = (heading[1] ?? '').trim() || undefined
+      return []
+    }
+    const match = ITEM.exec(clean)
+    if (!match) return []
+    const todo: Todo = { line, text: (match[4] ?? '').trim(), isDone: match[2] !== ' ' }
+
+    return [section ? { ...todo, section } : todo]
   })
+}
 
 // Creates today's file on first use, carrying over what the latest earlier day left undone.
 async function ensureToday($: EngineInterface, dir: string, date: string) {
@@ -174,11 +196,22 @@ async function rename($: EngineInterface, todo: Todo, text: string) {
   )
 }
 
+// A new item goes after the items above the first heading, so it is not
+// filed under whatever section ends the file; with no heading, at the end.
 function add($: EngineInterface, text: string) {
   return editFile($, `新增「${short(text)}」`, lines => {
-    const body = lines[lines.length - 1] === '' ? lines.slice(0, -1) : lines
+    const item = `- [ ] ${text}`
+    const heading = lines.findIndex(raw => HEADING.test(raw.replace(/\r$/, '')))
+    if (heading === -1) {
+      const body = lines[lines.length - 1] === '' ? lines.slice(0, -1) : lines
 
-    return [...body, `- [ ] ${text}`, '']
+      return [...body, item, '']
+    }
+    let at = heading
+    while (at > 0 && (lines[at - 1] ?? '').trim() === '') at--
+    const afterTitle = /^#\s/.test(lines[at - 1] ?? '')
+
+    return [...lines.slice(0, at), ...(afterTitle ? [''] : []), item, ...lines.slice(at)]
   })
 }
 
@@ -198,6 +231,8 @@ async function submit($: EngineInterface, text: string) {
 
 // Called from the plugin's one session.start hook.
 export async function startTodo($: EngineInterface) {
+  const saved = (await $.store.get(FOLDED_KEY)) as string[] | undefined
+  if (saved) await update($, folded, () => saved)
   await refreshTodo($)
   $.clock.every(POLL_MS, () => refreshTodo($))
 }
@@ -216,8 +251,8 @@ export function registerTodo(on: On) {
   })
 }
 
-// The to-do half of the panel: open items, the new-item field, then the
-// finished ones folded under a toggle.
+// The to-do half of the panel: open items above any heading, the new-item
+// field, each heading's open items under a fold, then the finished ones.
 export async function todoSection($: EngineInterface, e: RenderInput) {
   const ui = $.ui.resolve(e)
   const { Box, Text, Button } = ui
@@ -233,6 +268,9 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
   const todos = current?.todos ?? []
   const open = todos.filter(todo => !todo.isDone)
   const done = todos.filter(todo => todo.isDone)
+  // Headings in file order, each shown while it holds an open item.
+  const sections = [...new Set(open.flatMap(todo => (todo.section ? [todo.section] : [])))]
+  const foldedSections = await read($, folded)
 
   const row = (todo: Todo) =>
     Input && rewording === rowId(todo) ? (
@@ -286,7 +324,7 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
       {open.length === 0 && (
         <Text dimColor>{todos.length === 0 ? '今天還沒有待辦，下面輸入一項吧。' : '今天的待辦都完成了。'}</Text>
       )}
-      {open.map(row)}
+      {open.filter(todo => !todo.section).map(row)}
       {Input && (
         <Box marginTop={1}>
           <Input
@@ -306,6 +344,19 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
         </Box>
       )}
       {note && <Text color="warning">{note}</Text>}
+      {sections.map(name => {
+        const items = open.filter(todo => todo.section === name)
+        const isFolded = foldedSections.includes(name)
+
+        return (
+          <Box key={`section-${name}`} flexDirection="column" marginTop={1}>
+            <Button key={`fold-${name}`} plain onPress={() => fold($, name)}>
+              {isFolded ? '▸' : '▾'} <Text bold>{name}</Text> <Text dimColor>{items.length} 項</Text>
+            </Button>
+            {!isFolded && items.map(row)}
+          </Box>
+        )
+      })}
       {done.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Box flexDirection="row" justifyContent="space-between">

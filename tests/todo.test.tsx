@@ -96,3 +96,59 @@ test('open items first, the field clears after Enter, finished items fold away',
     await other.unmount()
   }
 })
+
+test('items group under their ## / ### heading, a heading folds, new items stay above the headings', async ($, on) => {
+  const files: Record<string, string> = {
+    [PATH]: [
+      '# 2026-10-25 每日待辦',
+      '',
+      '- [ ] 散的一項',
+      '',
+      '## 工作快照',
+      '說明文字',
+      '',
+      '### 一、近期',
+      '- [ ] 跟進報價',
+      '- [ ] 寄簡報',
+      '',
+      '### 二、等待回覆',
+      '- [ ] 等客戶回信',
+      '- [x] 已寄出',
+      '',
+    ].join('\n'),
+  }
+  mock.env(on, { HOME: '/home/u' })
+  mock.clock(on, { now: new Date(2026, 9, 25, 9).getTime() })
+  mock.store(on)
+  on('fs.exists', (_, e) => ({ value: norm(e.path) in files || norm(e.path) === DIR }))
+  on('fs.read', (_, e) => (norm(e.path) in files ? { value: files[norm(e.path)] ?? '' } : { deny: 'no such file' }))
+  on('fs.write', (_, e) => {
+    files[norm(e.path)] = e.text
+    return { value: undefined }
+  })
+  on('fs.list', () => ({ value: [] }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('http.fetch', () => ({ deny: 'offline' }))
+  on('session.authorize', () => ({ value: undefined }))
+
+  await $.command.run({ command: 'quota', args: '', origin: 'user' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // The ## heading holds no item of its own, so only the two ### show.
+  expect(await ui.find({ type: 'Button', key: 'fold-工作快照' })).toBeUndefined()
+  expect((await ui.find({ type: 'Button', key: 'fold-一、近期' }))?.text).toContain('2 項')
+  expect((await ui.find({ type: 'Button', key: 'fold-二、等待回覆' }))?.text).toContain('1 項')
+  expect(await ui.find({ type: 'Button', text: /跟進報價/ })).toBeDefined()
+
+  await $.ui.press({ plugin: 'ai-quota-todo', key: 'fold-一、近期' })
+  expect(await ui.find({ type: 'Button', text: /跟進報價/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Button', key: 'fold-一、近期' }))?.text).toContain('▸')
+  expect(await ui.find({ type: 'Button', text: /等客戶回信/ })).toBeDefined()
+  await $.ui.press({ plugin: 'ai-quota-todo', key: 'fold-一、近期' })
+  expect(await ui.find({ type: 'Button', text: /跟進報價/ })).toBeDefined()
+
+  await $.ui.input({ plugin: 'ai-quota-todo', key: 'new-0', text: '新的一項' })
+  expect(files[PATH]).toContain('- [ ] 散的一項\n- [ ] 新的一項\n\n## 工作快照')
+  expect(files[PATH]?.trimEnd().endsWith('- [x] 已寄出')).toBe(true)
+  await ui.unmount()
+})
