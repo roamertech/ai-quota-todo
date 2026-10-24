@@ -43,10 +43,11 @@ test('open items first, the field clears after Enter, finished items fold away',
   expect((await ui.find({ type: 'Text', text: /完成/ }))?.text).toBe('完成 1/2')
   expect(await ui.find({ type: 'Button', text: /回信/ })).toBeUndefined()
 
-  await $.ui.input({ plugin: 'ai-quota-todo', key: 'new', text: '買咖啡', kind: 'change' })
-  await $.ui.input({ plugin: 'ai-quota-todo', key: 'new', text: '買咖啡' })
+  // Enter with no change events before it, as the desktop app may send them late.
+  await $.ui.input({ plugin: 'ai-quota-todo', key: 'new-0', text: '買咖啡' })
   expect(files[PATH]).toContain('- [ ] 買咖啡')
-  expect((await ui.find({ type: 'Input', key: 'new' }))?.text ?? '').toBe('')
+  expect(await ui.find({ type: 'Input', key: 'new-0' })).toBeUndefined()
+  expect((await ui.find({ type: 'Input', key: 'new-1' }))?.text ?? '').toBe('')
 
   await $.ui.press({ plugin: 'ai-quota-todo', key: 'show-done' })
   expect(await ui.find({ type: 'Button', text: /回信/ })).toBeDefined()

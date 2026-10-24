@@ -14,8 +14,10 @@ const POLL_MS = 3000
 const ITEM = /^(\s*[-*]\s+\[)([ xX])(\]\s?)(.*)$/
 
 const day = atom({ plugin: 'ai-quota-todo', key: 'day' } as const, null as Day | null)
-// What the new-item field holds; emptied after Enter so the field clears.
-const draft = atom({ plugin: 'ai-quota-todo', key: 'draft' } as const, '')
+// Counts items added from the pane. The new-item field's key carries it, so
+// each Enter draws a fresh, empty field: the desktop app's typing events can
+// arrive after Enter, and a value drawn back would put the text back in.
+const entry = atom({ plugin: 'ai-quota-todo', key: 'entry' } as const, 0)
 const showDone = atom({ plugin: 'ai-quota-todo', key: 'showDone' } as const, false)
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -123,7 +125,7 @@ function clearDone($: EngineInterface, done: Todo[]) {
 }
 
 async function submit($: EngineInterface, text: string) {
-  await update($, draft, () => '')
+  await update($, entry, n => n + 1)
   const trimmed = text.trim()
   if (trimmed) await add($, trimmed)
 }
@@ -156,7 +158,7 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
   // The mobile app draws no field yet.
   const Input = 'Input' in ui ? ui.Input : undefined
   const current = await read($, day)
-  const typed = await read($, draft)
+  const added = await read($, entry)
   const isShowingDone = await read($, showDone)
   const todos = current?.todos ?? []
   const open = todos.filter(todo => !todo.isDone)
@@ -193,11 +195,10 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
       {Input && (
         <Box marginTop={1}>
           <Input
-            key="new"
+            key={`new-${added}`}
             placeholder="新增待辦，按 Enter"
             submitLabel="新增"
-            value={typed}
-            onInput={text => void update($, draft, () => text)}
+            value=""
             onSubmit={text => void submit($, text)}
           />
         </Box>
