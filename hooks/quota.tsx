@@ -246,7 +246,7 @@ async function fetchChatGptLive($: EngineInterface, home: string): Promise<ChatG
 function lastLimits(text: string): CodexLimits | undefined {
   const lines = text.split('\n')
   for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i]
+    const line = lines[i] ?? ''
     if (!line.includes('"rate_limits":{')) continue
     try {
       const limits = JSON.parse(line)?.payload?.rate_limits

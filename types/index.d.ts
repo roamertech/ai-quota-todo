@@ -26,6 +26,8 @@ declare module 'claude-code' {
       chatgpt: ChatGptSnapshot
       tick: number
       day: Day | null
+      draft: string
+      showDone: boolean
     }
   }
 }
