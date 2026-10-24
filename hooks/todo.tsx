@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, RenderInput } from 'claude-code'
 
-import type { Day, Todo } from '../types'
+import type { Change, Day, Todo } from '../types'
 
 // One Markdown checklist per day, shared with Codex:
 //   ~/todo/2026-10-25.md
@@ -22,11 +22,28 @@ const showDone = atom({ plugin: 'ai-quota-todo', key: 'showDone' } as const, fal
 // A remove or a clear waits for a second press: the row (or 'clear-done') asked about.
 const confirming = atom({ plugin: 'ai-quota-todo', key: 'confirming' } as const, null as string | null)
 const CLEAR_DONE = 'clear-done'
+// The row drawn as a field for rewording it, if any.
+const editing = atom({ plugin: 'ai-quota-todo', key: 'editing' } as const, null as string | null)
+
+// Each change made from the pane, newest last, for 復原: the file before and
+// after it. An undo writes `before` back only while the file still reads `after`.
+const HISTORY = 20
+const history = atom({ plugin: 'ai-quota-todo', key: 'history' } as const, [] as Change[])
+// Why the last 復原 did nothing, until the next change from the pane.
+const undoNote = atom({ plugin: 'ai-quota-todo', key: 'undoNote' } as const, '')
 
 const rowId = (todo: Todo) => `${todo.line}:${todo.text}`
+const short = (text: string) => (text.length > 12 ? `${text.slice(0, 12)}…` : text)
 
-function ask($: EngineInterface, id: string | null) {
-  return update($, confirming, () => id)
+// Asks about one removal (or none), dropping any rewording in progress.
+async function ask($: EngineInterface, id: string | null) {
+  await update($, editing, () => null)
+  await update($, confirming, () => id)
+}
+
+async function startEdit($: EngineInterface, todo: Todo) {
+  await ask($, null)
+  await update($, editing, () => rowId(todo))
 }
 
 const pad = (n: number) => String(n).padStart(2, '0')
@@ -91,12 +108,32 @@ export async function refreshTodo($: EngineInterface) {
   }
 }
 
-// Re-reads the file, applies `edit` to its lines, writes it back and redraws.
-async function editFile($: EngineInterface, edit: (lines: string[]) => string[]) {
+// Re-reads the file, applies `edit` to its lines, writes it back, keeps the
+// change for 復原 under `label`, and redraws.
+async function editFile($: EngineInterface, label: string, edit: (lines: string[]) => string[]) {
   const current = await read($, day)
   if (!current?.path) return
-  const lines = (await $.fs.read(current.path)).split('\n')
-  await $.fs.write(current.path, edit(lines).join('\n'))
+  const path = current.path
+  const before = await $.fs.read(path)
+  const after = edit(before.split('\n')).join('\n')
+  await update($, undoNote, () => '')
+  if (after === before) return
+  await $.fs.write(path, after)
+  await update($, history, list => [...list, { path, before, after, label }].slice(-HISTORY))
+  await refreshTodo($)
+}
+
+async function undo($: EngineInterface) {
+  await ask($, null)
+  const last = (await read($, history)).at(-1)
+  if (!last) return
+  await update($, history, list => list.slice(0, -1))
+  if ((await $.fs.read(last.path)) !== last.after) {
+    await update($, undoNote, () => `沒有復原「${last.label}」：檔案之後在別處改過了。`)
+    await refreshTodo($)
+    return
+  }
+  await $.fs.write(last.path, last.before)
   await refreshTodo($)
 }
 
@@ -109,7 +146,7 @@ const sameItem = (raw: string | undefined, todo: Todo) => {
 
 async function toggle($: EngineInterface, todo: Todo) {
   await ask($, null)
-  return editFile($, lines =>
+  return editFile($, `${todo.isDone ? '取消完成' : '完成'}「${short(todo.text)}」`, lines =>
     lines.map((raw, i) =>
       i === todo.line && sameItem(raw, todo)
         ? raw.replace(ITEM, (_, a, mark, b, rest) => `${a}${mark === ' ' ? 'x' : ' '}${b}${rest}`)
@@ -120,11 +157,25 @@ async function toggle($: EngineInterface, todo: Todo) {
 
 async function remove($: EngineInterface, todo: Todo) {
   await ask($, null)
-  return editFile($, lines => lines.filter((raw, i) => !(i === todo.line && sameItem(raw, todo))))
+  return editFile($, `刪除「${short(todo.text)}」`, lines =>
+    lines.filter((raw, i) => !(i === todo.line && sameItem(raw, todo))),
+  )
+}
+
+// Rewords the item, keeping its mark; an emptied field changes nothing.
+async function rename($: EngineInterface, todo: Todo, text: string) {
+  await ask($, null)
+  const trimmed = text.trim()
+  if (!trimmed || trimmed === todo.text) return
+  return editFile($, `修改「${short(todo.text)}」`, lines =>
+    lines.map((raw, i) =>
+      i === todo.line && sameItem(raw, todo) ? raw.replace(ITEM, (_, a, mark, b) => `${a}${mark}${b}${trimmed}`) : raw,
+    ),
+  )
 }
 
 function add($: EngineInterface, text: string) {
-  return editFile($, lines => {
+  return editFile($, `新增「${short(text)}」`, lines => {
     const body = lines[lines.length - 1] === '' ? lines.slice(0, -1) : lines
 
     return [...body, `- [ ] ${text}`, '']
@@ -133,7 +184,9 @@ function add($: EngineInterface, text: string) {
 
 async function clearDone($: EngineInterface, done: Todo[]) {
   await ask($, null)
-  return editFile($, lines => lines.filter((raw, i) => !done.some(todo => todo.line === i && sameItem(raw, todo))))
+  return editFile($, `清除 ${done.length} 項已完成`, lines =>
+    lines.filter((raw, i) => !done.some(todo => todo.line === i && sameItem(raw, todo))),
+  )
 }
 
 async function submit($: EngineInterface, text: string) {
@@ -174,28 +227,48 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
   const added = await read($, entry)
   const isShowingDone = await read($, showDone)
   const pending = await read($, confirming)
+  const rewording = await read($, editing)
+  const lastChange = (await read($, history)).at(-1)
+  const note = await read($, undoNote)
   const todos = current?.todos ?? []
   const open = todos.filter(todo => !todo.isDone)
   const done = todos.filter(todo => todo.isDone)
 
-  const row = (todo: Todo) => (
-    <Box key={`row-${todo.line}`} flexDirection="row" justifyContent="space-between" alignItems="flex-start" gap={1}>
-      <Box flexGrow={1} flexShrink={1}>
-        <Button key={`toggle-${todo.line}`} plain onPress={() => toggle($, todo)}>
-          {todo.isDone ? '☑' : '☐'} {todo.isDone ? <Text dimColor strikethrough>{todo.text}</Text> : todo.text}
-        </Button>
-      </Box>
-      {pending === rowId(todo) ? (
-        <Box flexDirection="row" gap={1}>
-          <Text color="warning">刪除？</Text>
-          <Button key={`confirm-${todo.line}`} plain label="確定刪除" onPress={() => remove($, todo)} />
-          <Button key={`cancel-${todo.line}`} plain dimColor label="取消" onPress={() => ask($, null)} />
+  const row = (todo: Todo) =>
+    Input && rewording === rowId(todo) ? (
+      <Box key={`row-${todo.line}`} flexDirection="row" alignItems="center" gap={1}>
+        <Box flexGrow={1} flexShrink={1}>
+          <Input
+            key={`edit-${todo.line}`}
+            value={todo.text}
+            submitLabel="儲存"
+            autoFocus
+            onSubmit={text => void rename($, todo, text)}
+          />
         </Box>
-      ) : (
-        <Button key={`remove-${todo.line}`} plain dimColor label="✕" onPress={() => ask($, rowId(todo))} />
-      )}
-    </Box>
-  )
+        <Button key={`cancel-edit-${todo.line}`} plain dimColor label="取消" onPress={() => ask($, null)} />
+      </Box>
+    ) : (
+      <Box key={`row-${todo.line}`} flexDirection="row" justifyContent="space-between" alignItems="flex-start" gap={1}>
+        <Box flexGrow={1} flexShrink={1}>
+          <Button key={`toggle-${todo.line}`} plain onPress={() => toggle($, todo)}>
+            {todo.isDone ? '☑' : '☐'} {todo.isDone ? <Text dimColor strikethrough>{todo.text}</Text> : todo.text}
+          </Button>
+        </Box>
+        {pending === rowId(todo) ? (
+          <Box flexDirection="row" gap={1}>
+            <Text color="warning">刪除？</Text>
+            <Button key={`confirm-${todo.line}`} plain label="確定刪除" onPress={() => remove($, todo)} />
+            <Button key={`cancel-${todo.line}`} plain dimColor label="取消" onPress={() => ask($, null)} />
+          </Box>
+        ) : (
+          <Box flexDirection="row" gap={1}>
+            {Input && <Button key={`rename-${todo.line}`} plain dimColor label="✎" onPress={() => startEdit($, todo)} />}
+            <Button key={`remove-${todo.line}`} plain dimColor label="✕" onPress={() => ask($, rowId(todo))} />
+          </Box>
+        )}
+      </Box>
+    )
 
   return (
     <Box flexDirection="column">
@@ -225,6 +298,14 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
           />
         </Box>
       )}
+      {lastChange && lastChange.path === current?.path && (
+        <Box marginTop={1}>
+          <Button key="undo" plain dimColor onPress={() => undo($)}>
+            ↶ 復原：{lastChange.label}
+          </Button>
+        </Box>
+      )}
+      {note && <Text color="warning">{note}</Text>}
       {done.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Box flexDirection="row" justifyContent="space-between">

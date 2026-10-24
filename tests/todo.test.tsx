@@ -59,6 +59,20 @@ test('open items first, the field clears after Enter, finished items fold away',
   await $.ui.press({ plugin: 'ai-quota-todo', key: 'confirm-4' })
   expect(files[PATH]).not.toContain('買咖啡')
 
+  // 復原 brings the removed item back.
+  expect((await ui.find({ type: 'Button', key: 'undo' }))?.text).toContain('刪除「買咖啡」')
+  await $.ui.press({ plugin: 'ai-quota-todo', key: 'undo' })
+  expect(files[PATH]).toContain('- [ ] 買咖啡')
+
+  // ✎ turns the row into a field; Enter saves the new wording, 復原 puts the old one back.
+  await $.ui.press({ plugin: 'ai-quota-todo', key: 'rename-2' })
+  expect((await ui.find({ type: 'Input', key: 'edit-2' }))?.text).toBe('寫企劃')
+  await $.ui.input({ plugin: 'ai-quota-todo', key: 'edit-2', text: '寫企劃書' })
+  expect(files[PATH]).toContain('- [ ] 寫企劃書')
+  expect(await ui.find({ type: 'Input', key: 'edit-2' })).toBeUndefined()
+  await $.ui.press({ plugin: 'ai-quota-todo', key: 'undo' })
+  expect(files[PATH]).toContain('- [ ] 寫企劃\n')
+
   await $.ui.press({ plugin: 'ai-quota-todo', key: 'show-done' })
   expect(await ui.find({ type: 'Button', text: /回信/ })).toBeDefined()
 
@@ -67,11 +81,18 @@ test('open items first, the field clears after Enter, finished items fold away',
   await $.ui.press({ plugin: 'ai-quota-todo', key: 'confirm-clear' })
   expect(files[PATH]).not.toContain('回信')
   expect(files[PATH]).toContain('- [ ] 寫企劃')
+
+  // An edit made elsewhere since then is not overwritten by 復原.
+  files[PATH] = `${files[PATH]}- [ ] 別處加的\n`
+  await $.ui.press({ plugin: 'ai-quota-todo', key: 'undo' })
+  expect(files[PATH]).not.toContain('回信')
+  expect(files[PATH]).toContain('別處加的')
+  expect((await ui.find({ type: 'Text', text: /沒有復原/ }))?.text).toContain('別處改過')
   await ui.unmount()
 
   for (const surface of ['terminal', 'vscode', 'mobile'] as const) {
     const other = await $.ui.mount({ ...PANE, surface })
-    expect((await other.find({ type: 'Text', text: /完成/ }))?.text).toBe('完成 0/1')
+    expect((await other.find({ type: 'Text', text: /完成/ }))?.text).toBe('完成 0/3')
     await other.unmount()
   }
 })

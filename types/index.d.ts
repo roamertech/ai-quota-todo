@@ -16,6 +16,7 @@ export type ChatGptSnapshot = {
 
 export type Todo = { line: number; text: string; isDone: boolean }
 export type Day = { date: string; path: string; todos: Todo[]; error?: string }
+export type Change = { path: string; before: string; after: string; label: string }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -29,6 +30,9 @@ declare module 'claude-code' {
       entry: number
       showDone: boolean
       confirming: string | null
+      editing: string | null
+      history: Change[]
+      undoNote: string
     }
   }
 }
