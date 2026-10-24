@@ -1,0 +1,5 @@
+{
+  "name": "ai-quota-todo",
+  "owner": { "name": "roamertech" },
+  "plugins": [{ "name": "ai-quota-todo", "source": "./" }]
+}

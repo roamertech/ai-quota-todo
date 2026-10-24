@@ -1,0 +1,165 @@
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, On, RenderInput } from 'claude-code'
+
+import type { Day, Todo } from '../types'
+
+// One Markdown checklist per day, shared with Codex:
+//   ~/todo/2026-10-25.md
+//   - [ ] 未完成
+//   - [x] 已完成
+// The file is the source of truth; the panel re-reads it every few seconds so
+// edits from Codex (or by hand) show up, and every change re-reads before writing.
+
+const POLL_MS = 3000
+const ITEM = /^(\s*[-*]\s+\[)([ xX])(\]\s?)(.*)$/
+
+const day = atom({ plugin: 'ai-quota-todo', key: 'day' } as const, null as Day | null)
+
+const pad = (n: number) => String(n).padStart(2, '0')
+
+async function today($: EngineInterface) {
+  const now = new Date(await $.clock.now())
+
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+}
+
+async function todoDir($: EngineInterface) {
+  return `${(await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? '~'}/todo`
+}
+
+const parse = (text: string): Todo[] =>
+  text.split('\n').flatMap((raw, line) => {
+    const match = ITEM.exec(raw.replace(/\r$/, ''))
+
+    return match ? [{ line, text: match[4].trim(), isDone: match[2] !== ' ' }] : []
+  })
+
+// Creates today's file on first use, carrying over what the latest earlier day left undone.
+async function ensureToday($: EngineInterface, dir: string, date: string) {
+  const path = `${dir}/${date}.md`
+  if (await $.fs.exists(path)) return path
+
+  const earlier = (await $.fs.list(dir).catch(() => []))
+    .map(entry => entry.name)
+    .filter(name => /^\d{4}-\d{2}-\d{2}\.md$/.test(name) && name < `${date}.md`)
+    .sort()
+    .pop()
+  const carried = earlier
+    ? parse(await $.fs.read(`${dir}/${earlier}`)).filter(todo => !todo.isDone)
+    : []
+  const lines = [`# ${date} 每日待辦`, '', ...carried.map(todo => `- [ ] ${todo.text}`)]
+  await $.fs.write(path, `${lines.join('\n')}\n`)
+
+  return path
+}
+
+export async function refreshTodo($: EngineInterface) {
+  try {
+    const date = await today($)
+    const path = await ensureToday($, await todoDir($), date)
+    const todos = parse(await $.fs.read(path))
+    const before = await read($, day)
+    if (before && before.path === path && !before.error && JSON.stringify(before.todos) === JSON.stringify(todos)) {
+      return
+    }
+    await update($, day, () => ({ date, path, todos }))
+  } catch (error) {
+    await update($, day, old => ({ date: old?.date ?? '', path: old?.path ?? '', todos: old?.todos ?? [], error: String(error) }))
+  }
+}
+
+// Re-reads the file, applies `edit` to its lines, writes it back and redraws.
+async function editFile($: EngineInterface, edit: (lines: string[]) => string[]) {
+  const current = await read($, day)
+  if (!current?.path) return
+  const lines = (await $.fs.read(current.path)).split('\n')
+  await $.fs.write(current.path, edit(lines).join('\n'))
+  await refreshTodo($)
+}
+
+// The line still holds the item the panel drew, so a concurrent edit by Codex is not clobbered.
+const sameItem = (raw: string | undefined, todo: Todo) => {
+  const match = raw === undefined ? null : ITEM.exec(raw.replace(/\r$/, ''))
+
+  return match !== null && match[4].trim() === todo.text
+}
+
+function toggle($: EngineInterface, todo: Todo) {
+  return editFile($, lines =>
+    lines.map((raw, i) =>
+      i === todo.line && sameItem(raw, todo)
+        ? raw.replace(ITEM, (_, a, mark, b, rest) => `${a}${mark === ' ' ? 'x' : ' '}${b}${rest}`)
+        : raw,
+    ),
+  )
+}
+
+function remove($: EngineInterface, todo: Todo) {
+  return editFile($, lines => lines.filter((raw, i) => !(i === todo.line && sameItem(raw, todo))))
+}
+
+function add($: EngineInterface, text: string) {
+  return editFile($, lines => {
+    const body = lines[lines.length - 1] === '' ? lines.slice(0, -1) : lines
+
+    return [...body, `- [ ] ${text}`, '']
+  })
+}
+
+// Called from the plugin's one session.start hook.
+export async function startTodo($: EngineInterface) {
+  await refreshTodo($)
+  $.clock.every(POLL_MS, () => refreshTodo($))
+}
+
+export function registerTodo(on: On) {
+  // Lets Claude add or tick items when asked, the same file Codex uses.
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    const dir = await todoDir($)
+    const text =
+      `The user's daily to-do list is a Markdown checklist at ${dir}/YYYY-MM-DD.md (one file per local date, ` +
+      '"- [ ] item" / "- [x] item"), shared with Codex and shown in a side pane. ' +
+      "When the user asks to add, finish or list to-dos, edit today's file, keeping that format."
+
+    return { sections: [...composed.sections, { id: 'daily-todo:file', text, scope: 'session' }] }
+  })
+}
+
+// The to-do half of the panel.
+export async function todoSection($: EngineInterface, e: RenderInput) {
+  const { Box, Text, Button, Input } = $.ui.resolve(e)
+  const current = await read($, day)
+  const todos = current?.todos ?? []
+  const left = todos.filter(todo => !todo.isDone).length
+
+  return (
+    <Box flexDirection="column">
+      <Text bold>
+        每日待辦 · {current?.date ?? '…'}　剩 {left} / {todos.length} 項
+      </Text>
+      {current?.error && <Text color="error">讀不到檔案：{current.error}</Text>}
+      {todos.length === 0 && <Text dimColor>今天還沒有待辦，下面輸入一項吧。</Text>}
+      {todos.map(todo => (
+        <Box key={`row-${todo.line}`}>
+          <Button key={`toggle-${todo.line}`} plain onPress={() => toggle($, todo)}>
+            {todo.isDone ? '☑' : '☐'} {todo.isDone ? <Text dimColor strikethrough>{todo.text}</Text> : todo.text}
+          </Button>
+          <Text> </Text>
+          <Button key={`remove-${todo.line}`} plain label="✕" onPress={() => remove($, todo)} />
+        </Box>
+      ))}
+      <Input
+        key="new"
+        placeholder="新增待辦，按 Enter"
+        submitLabel="新增"
+        value=""
+        onSubmit={text => {
+          const trimmed = text.trim()
+          if (trimmed) void add($, trimmed)
+        }}
+      />
+      <Text dimColor>{current?.path}</Text>
+    </Box>
+  )
+}
