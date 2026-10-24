@@ -16,7 +16,7 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     const ran = await next(e)
-    await $.command.register({ name: 'quota', description: '打開面板：AI 額度（Claude + ChatGPT）和每日待辦' })
+    await $.command.register({ name: 'quota', description: '打開面板：AI 額度（Claude + ChatGPT）和待辦清單' })
     void $.ui.open({ id: PANE, title: TITLE })
     await Promise.all([startQuota($), startTodo($)])
 
@@ -27,7 +27,7 @@ export const register: Register = on => {
     await $.ui.open({ id: PANE, title: TITLE })
     await Promise.all([refreshQuota($), refreshTodo($)])
 
-    return { text: '已打開並更新面板（AI 額度 + 每日待辦）。' }
+    return { text: '已打開並更新面板（AI 額度 + 待辦清單）。' }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

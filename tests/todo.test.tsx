@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 const DIR = '/home/u/todo'
-const PATH = `${DIR}/2026-10-25.md`
+const PATH = `${DIR}/todo.md`
 // The engine hands fs hooks absolute host paths (C:\home\u\... on Windows).
 const norm = (path: string) => path.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
 const PANE = {
@@ -39,7 +39,7 @@ test('open items first, the field clears after Enter, finished items fold away',
   await $.command.run({ command: 'quota', args: '', origin: 'user' } as never)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /10\/25（週日）/ }))?.text).toContain('每日待辦')
+  expect((await ui.find({ type: 'Text', text: /待辦清單/ }))?.text).toBe('待辦清單')
   expect((await ui.find({ type: 'Text', text: /完成/ }))?.text).toBe('完成 1/2')
   expect(await ui.find({ type: 'Button', text: /回信/ })).toBeUndefined()
 
@@ -153,28 +153,23 @@ test('items group under their ## / ### heading, a heading folds, new items stay 
   await ui.unmount()
 })
 
-test("a new day carries the last day's open items over under their headings", async ($, on) => {
+test('the first run starts todo.md from the newest daily file, whole, and leaves that file alone', async ($, on) => {
+  const daily = [
+    '# 2026-10-24 每日待辦',
+    '',
+    '- [ ] 散的一項',
+    '',
+    '## 工作快照',
+    '說明文字',
+    '',
+    '### 一、近期',
+    '- [ ] 跟進報價',
+    '- [x] 已寄簡報',
+    '',
+  ].join('\n')
   const files: Record<string, string> = {
-    [`${DIR}/2026-10-24.md`]: [
-      '# 2026-10-24 每日待辦',
-      '',
-      '- [ ] 散的一項',
-      '- [x] 做完的散項',
-      '',
-      '## 工作快照',
-      '說明文字',
-      '',
-      '### 一、近期',
-      '- [ ] 跟進報價',
-      '- [x] 已寄簡報',
-      '',
-      '### 二、全做完了',
-      '- [x] 已回信',
-      '',
-      '### 三、等待回覆',
-      '- [ ] 等客戶回信',
-      '',
-    ].join('\n'),
+    [`${DIR}/2026-10-23.md`]: '# 2026-10-23 每日待辦\n\n- [ ] 舊的\n',
+    [`${DIR}/2026-10-24.md`]: daily,
   }
   mock.env(on, { HOME: '/home/u' })
   mock.clock(on, { now: new Date(2026, 9, 25, 9).getTime() })
@@ -194,18 +189,14 @@ test("a new day carries the last day's open items over under their headings", as
 
   await $.command.run({ command: 'quota', args: '', origin: 'user' } as never)
 
-  expect(files[PATH]).toBe(
-    [
-      '# 2026-10-25 每日待辦',
-      '',
-      '- [ ] 散的一項',
-      '',
-      '### 一、近期',
-      '- [ ] 跟進報價',
-      '',
-      '### 三、等待回覆',
-      '- [ ] 等客戶回信',
-      '',
-    ].join('\n'),
-  )
+  expect(files[PATH]).toBe(daily.replace('# 2026-10-24 每日待辦', '# 待辦清單'))
+  expect(files[`${DIR}/2026-10-24.md`]).toBe(daily)
+
+  // Later runs keep using todo.md, whatever daily files sit beside it.
+  files[`${DIR}/2026-10-25.md`] = '# 2026-10-25 每日待辦\n\n- [ ] 不該讀到\n'
+  await $.command.run({ command: 'quota', args: '', origin: 'user' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Button', text: /不該讀到/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', text: /跟進報價/ })).toBeDefined()
+  await ui.unmount()
 })

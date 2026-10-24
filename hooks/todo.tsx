@@ -1,10 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, RenderInput } from 'claude-code'
 
-import type { Change, Day, Todo } from '../types'
+import type { Change, Todo, TodoFile } from '../types'
 
-// One Markdown checklist per day, shared with Codex:
-//   ~/todo/2026-10-25.md
+// One Markdown checklist, shared with Codex:
+//   ~/todo/todo.md
+//   ### 分區
 //   - [ ] 未完成
 //   - [x] 已完成
 // The file is the source of truth; the panel re-reads it every few seconds so
@@ -14,8 +15,13 @@ const POLL_MS = 3000
 const ITEM = /^(\s*[-*]\s+\[)([ xX])(\]\s?)(.*)$/
 const HEADING = /^#{2,6}\s+(.*)$/
 const FOLDED_KEY = 'folded'
+const FILE_NAME = 'todo.md'
+const TITLE = '# 待辦清單'
+// The one-file-per-day names earlier versions wrote, `# 2026-10-25 每日待辦` on top.
+const DAILY_NAME = /^\d{4}-\d{2}-\d{2}\.md$/
+const DAILY_TITLE = /^# \d{4}-\d{2}-\d{2} 每日待辦\s*$/
 
-const day = atom({ plugin: 'ai-quota-todo', key: 'day' } as const, null as Day | null)
+const todoFile = atom({ plugin: 'ai-quota-todo', key: 'file' } as const, null as TodoFile | null)
 // Counts items added from the pane. The new-item field's key carries it, so
 // each Enter draws a fresh, empty field: the desktop app's typing events can
 // arrive after Enter, and a value drawn back would put the text back in.
@@ -55,23 +61,6 @@ async function startEdit($: EngineInterface, todo: Todo) {
   await update($, editing, () => rowId(todo))
 }
 
-const pad = (n: number) => String(n).padStart(2, '0')
-const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六']
-
-// "2026-10-25" → "10/25（週日）"
-function dayLabel(date: string) {
-  const [y, m, d] = date.split('-').map(Number)
-  if (!y || !m || !d) return date
-
-  return `${m}/${d}（週${WEEKDAYS[new Date(y, m - 1, d).getDay()]}）`
-}
-
-async function today($: EngineInterface) {
-  const now = new Date(await $.clock.now())
-
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
-}
-
 async function todoDir($: EngineInterface) {
   return `${(await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? '~'}/todo`
 }
@@ -96,52 +85,42 @@ const parse = (text: string): Todo[] => {
   })
 }
 
-// Creates today's file on first use, carrying over what the latest earlier
-// day left undone: loose items first, then each heading (as `###`) with its own.
-async function ensureToday($: EngineInterface, dir: string, date: string) {
-  const path = `${dir}/${date}.md`
+// Creates the file on first use: from the newest one-file-per-day list an
+// earlier version kept, whole and retitled, or empty.
+async function ensureFile($: EngineInterface, dir: string) {
+  const path = `${dir}/${FILE_NAME}`
   if (await $.fs.exists(path)) return path
 
-  const earlier = (await $.fs.list(dir).catch(() => []))
+  const newest = (await $.fs.list(dir).catch(() => []))
     .map(entry => entry.name)
-    .filter(name => /^\d{4}-\d{2}-\d{2}\.md$/.test(name) && name < `${date}.md`)
+    .filter(name => DAILY_NAME.test(name))
     .sort()
     .pop()
-  const carried = earlier
-    ? parse(await $.fs.read(`${dir}/${earlier}`)).filter(todo => !todo.isDone)
-    : []
-  const item = (todo: Todo) => `- [ ] ${todo.text}`
-  const sections = [...new Set(carried.flatMap(todo => (todo.section ? [todo.section] : [])))]
-  const body = [
-    ...carried.filter(todo => !todo.section).map(item),
-    ...sections.flatMap(name => ['', `### ${name}`, ...carried.filter(todo => todo.section === name).map(item)]),
-  ]
-  if (body[0] === '') body.shift()
-  const lines = [`# ${date} 每日待辦`, '', ...body]
-  await $.fs.write(path, `${lines.join('\n')}\n`)
+  const lines = newest ? (await $.fs.read(`${dir}/${newest}`)).split('\n') : [TITLE, '']
+  if (DAILY_TITLE.test(lines[0] ?? '')) lines[0] = TITLE
+  await $.fs.write(path, lines.join('\n'))
 
   return path
 }
 
 export async function refreshTodo($: EngineInterface) {
   try {
-    const date = await today($)
-    const path = await ensureToday($, await todoDir($), date)
+    const path = await ensureFile($, await todoDir($))
     const todos = parse(await $.fs.read(path))
-    const before = await read($, day)
+    const before = await read($, todoFile)
     if (before && before.path === path && !before.error && JSON.stringify(before.todos) === JSON.stringify(todos)) {
       return
     }
-    await update($, day, () => ({ date, path, todos }))
+    await update($, todoFile, () => ({ path, todos }))
   } catch (error) {
-    await update($, day, old => ({ date: old?.date ?? '', path: old?.path ?? '', todos: old?.todos ?? [], error: String(error) }))
+    await update($, todoFile, old => ({ path: old?.path ?? '', todos: old?.todos ?? [], error: String(error) }))
   }
 }
 
 // Re-reads the file, applies `edit` to its lines, writes it back, keeps the
 // change for 復原 under `label`, and redraws.
 async function editFile($: EngineInterface, label: string, edit: (lines: string[]) => string[]) {
-  const current = await read($, day)
+  const current = await read($, todoFile)
   if (!current?.path) return
   const path = current.path
   const before = await $.fs.read(path)
@@ -251,11 +230,11 @@ export function registerTodo(on: On) {
     const composed = await next(e)
     const dir = await todoDir($)
     const text =
-      `The user's daily to-do list is a Markdown checklist at ${dir}/YYYY-MM-DD.md (one file per local date, ` +
-      '"- [ ] item" / "- [x] item"), shared with Codex and shown in a side pane. ' +
-      "When the user asks to add, finish or list to-dos, edit today's file, keeping that format."
+      `The user's to-do list is one Markdown checklist at ${dir}/${FILE_NAME} ` +
+      '("- [ ] item" / "- [x] item", grouped under "###" headings), shared with Codex and shown in a side pane. ' +
+      'When the user asks to add, finish or list to-dos, edit that file in place, changing only the lines concerned.'
 
-    return { sections: [...composed.sections, { id: 'daily-todo:file', text, scope: 'session' }] }
+    return { sections: [...composed.sections, { id: 'todo:file', text, scope: 'session' }] }
   })
 }
 
@@ -266,7 +245,7 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
   const { Box, Text, Button } = ui
   // The mobile app draws no field yet.
   const Input = 'Input' in ui ? ui.Input : undefined
-  const current = await read($, day)
+  const current = await read($, todoFile)
   const added = await read($, entry)
   const isShowingDone = await read($, showDone)
   const pending = await read($, confirming)
@@ -319,7 +298,7 @@ export async function todoSection($: EngineInterface, e: RenderInput) {
   return (
     <Box flexDirection="column">
       <Box flexDirection="row" justifyContent="space-between" marginBottom={1}>
-        <Text bold>每日待辦 · {current?.date ? dayLabel(current.date) : '…'}</Text>
+        <Text bold>待辦清單</Text>
         <Text dimColor>
           完成 {done.length}/{todos.length}
         </Text>

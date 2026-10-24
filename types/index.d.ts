@@ -15,7 +15,7 @@ export type ChatGptSnapshot = {
 }
 
 export type Todo = { line: number; text: string; isDone: boolean; section?: string }
-export type Day = { date: string; path: string; todos: Todo[]; error?: string }
+export type TodoFile = { path: string; todos: Todo[]; error?: string }
 export type Change = { path: string; before: string; after: string; label: string }
 
 declare module 'claude-code' {
@@ -26,7 +26,7 @@ declare module 'claude-code' {
       accounts: Record<string, AccountReading>
       chatgpt: ChatGptSnapshot
       tick: number
-      day: Day | null
+      file: TodoFile | null
       entry: number
       showDone: boolean
       confirming: string | null
