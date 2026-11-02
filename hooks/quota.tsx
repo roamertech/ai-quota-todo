@@ -1,12 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, RenderInput, SessionUsage } from 'claude-code'
 
-import type { AccountReading, ChatGptSnapshot, QuotaSnapshot, QuotaWindow } from '../types'
+import type { AccountReading, ChatGptSnapshot, ClaudeAccount, QuotaSnapshot, QuotaWindow } from '../types'
 
 const REFRESH_MS = 60_000
 const ACCOUNTS_KEY = 'accounts'
 const claude = atom({ plugin: 'ai-quota-todo', key: 'claude' } as const, { windows: [] } as QuotaSnapshot)
-const email = atom({ plugin: 'ai-quota-todo', key: 'email' } as const, '')
+const account = atom({ plugin: 'ai-quota-todo', key: 'account' } as const, { key: '', label: '' } as ClaudeAccount)
 const accounts = atom({ plugin: 'ai-quota-todo', key: 'accounts' } as const, {} as Record<string, AccountReading>)
 const chatgpt = atom({ plugin: 'ai-quota-todo', key: 'chatgpt' } as const, { windows: [] } as ChatGptSnapshot)
 const tick = atom({ plugin: 'ai-quota-todo', key: 'tick' } as const, 0)
@@ -33,6 +33,9 @@ type Provider = 'claude' | 'chatgpt'
 type SharedWindow = { label: string; used_percent: number; remaining_percent: number; resets_at: string | null }
 type SharedProvider = {
   name: string
+  // Claude only: whose limits these are (email|organization). One email can hold a Team and a Max seat,
+  // and sessions on both may run at once; a reading without it, or for another account, is not used.
+  account?: string
   updated_at: string
   error: string | null
   note: string | null
@@ -74,6 +77,10 @@ function sharedToWindows(provider: Provider, entry: SharedProvider): QuotaWindow
 async function freshShared($: EngineInterface, provider: Provider) {
   const entry = (await readShared($)).providers?.[provider]
   if (!entry || entry.error !== null || entry.windows.length === 0) return undefined
+  if (provider === 'claude') {
+    const mine = (await read($, account)).key
+    if (!mine || entry.account !== mine) return undefined
+  }
   const at = Date.parse(entry.updated_at)
   if (!(at > (await $.clock.now()) - FRESH_MS)) return undefined
   return { windows: sharedToWindows(provider, entry), at }
@@ -84,8 +91,11 @@ async function writeShared($: EngineInterface, provider: Provider, windows: Quot
   if (!path || windows.length === 0) return
   const stamp = new Date(await $.clock.now()).toISOString().replace(/\.\d{3}Z$/, 'Z')
   const file = await readShared($)
+  const owner = provider === 'claude' ? (await read($, account)).key : undefined
+  if (provider === 'claude' && !owner) return
   const entry: SharedProvider = {
     name: provider === 'claude' ? 'Claude' : 'ChatGPT',
+    ...(owner ? { account: owner } : {}),
     updated_at: stamp,
     error: null,
     note: null,
@@ -152,28 +162,78 @@ async function fetchClaudeLive($: EngineInterface): Promise<QuotaWindow[] | unde
 }
 
 async function rememberAccount($: EngineInterface) {
-  const who = await read($, email)
+  const who = await read($, account)
   const snap = await read($, claude)
-  if (!who || snap.windows.length === 0) return
-  const reading: AccountReading = { windows: snap.windows, seenAt: await $.clock.now() }
-  await update($, accounts, all => ({ ...all, [who]: reading }))
+  if (!who.key || snap.windows.length === 0) return
+  const reading: AccountReading = { windows: snap.windows, seenAt: await $.clock.now(), label: who.label }
+  await update($, accounts, all => ({ ...all, [who.key]: reading }))
   await $.store.set(ACCOUNTS_KEY, await read($, accounts))
 }
 
-// The signed-in Claude account, as ~/.claude.json records it.
-async function detectEmail($: EngineInterface) {
+// The plan as people say it, from the organization the server reports.
+function planName(type: string | undefined, tier: string | undefined): string | undefined {
+  const t = (type ?? '').toLowerCase()
+  const r = (tier ?? '').toLowerCase()
+  if (t.includes('max') || r.includes('max')) return r.includes('20x') ? 'Max 20x' : r.includes('5x') ? 'Max 5x' : 'Max'
+  if (t.includes('team')) return 'Team'
+  if (t.includes('enterprise')) return 'Enterprise'
+  if (t.includes('pro')) return 'Pro'
+  return undefined
+}
+
+// This session's own seat, asked once with its own sign-in (one email can hold several seats).
+let planOf: { org: string; plan?: string } | undefined
+let planAsked = { org: '', at: 0 }
+
+async function fetchPlan($: EngineInterface, org: string): Promise<string | undefined> {
+  if (planOf?.org === org) return planOf.plan
+  const now = await $.clock.now()
+  if (planAsked.org === org && now - planAsked.at < MIN_ASK_MS) return undefined
+  planAsked = { org, at: now }
   try {
+    const auth = await $.session.authorize()
+    if (!auth || auth.kind !== 'bearer') return undefined
+    const res = await $.http.fetch('https://api.anthropic.com/api/oauth/profile', {
+      auth: auth.handle,
+      headers: { 'anthropic-beta': 'oauth-2025-04-20' },
+    })
+    if (!res.ok) return undefined
+    const o = (JSON.parse(res.text) as { organization?: { organization_type?: string; rate_limit_tier?: string } })
+      .organization
+    planOf = { org, plan: planName(o?.organization_type, o?.rate_limit_tier) }
+    return planOf.plan
+  } catch {
+    return undefined
+  }
+}
+
+// The account this session is signed in with. The desktop app hands each session its
+// organization and email; ~/.claude.json holds only the last sign-in on this computer.
+async function detectAccount($: EngineInterface) {
+  try {
+    let mail = await $.env.get('CLAUDE_CODE_USER_EMAIL')
+    let org = await $.env.get('CLAUDE_CODE_ORGANIZATION_UUID')
+    let orgName: string | undefined
     const home = await homeDir($)
-    if (!home) return
-    const found = JSON.parse(await $.fs.read(`${home}/.claude.json`))?.oauthAccount?.emailAddress
-    if (typeof found === 'string' && found && found !== (await read($, email))) {
-      await update($, email, () => found)
+    if (home && (await $.fs.exists(`${home}/.claude.json`))) {
+      const saved = JSON.parse(await $.fs.read(`${home}/.claude.json`))?.oauthAccount
+      if (saved && (!org || saved.organizationUuid === org)) {
+        mail = mail || saved.emailAddress
+        org = org || saved.organizationUuid
+        orgName = saved.organizationName
+      }
     }
+    if (!mail) return
+    const key = `${mail}|${org ?? ''}`
+    const plan = org ? await fetchPlan($, org) : undefined
+    const label = [mail, plan ?? orgName].filter(Boolean).join(' · ')
+    const was = await read($, account)
+    if (was.key !== key || was.label !== label) await update($, account, () => ({ key, label }))
   } catch {}
 }
 
 async function refreshClaude($: EngineInterface) {
-  await detectEmail($)
+  await detectAccount($)
   const shared = await freshShared($, 'claude')
   if (shared) {
     await update($, claude, s => ({ ...s, windows: shared.windows, isLive: true }))
@@ -356,7 +416,8 @@ export async function refreshQuota($: EngineInterface) {
 // Called from the plugin's one session.start hook.
 export async function startQuota($: EngineInterface) {
   const saved = (await $.store.get(ACCOUNTS_KEY)) as Record<string, AccountReading> | undefined
-  if (saved) await update($, accounts, () => saved)
+  // Readings from 0.11.0 were filed under a bare email, which cannot say which seat they were.
+  if (saved) await update($, accounts, () => Object.fromEntries(Object.entries(saved).filter(([k]) => k.includes('|'))))
   const usage = await $.session.usage()
   await update($, claude, () => fromMeasure(usage))
   await refreshQuota($)
@@ -384,12 +445,12 @@ export async function quotaSection($: EngineInterface, e: RenderInput) {
   const { Box, Text } = $.ui.resolve(e)
   await read($, tick)
   const c = await read($, claude)
-  const who = await read($, email)
+  const who = await read($, account)
   const all = await read($, accounts)
   const g = await read($, chatgpt)
   const now = await $.clock.now()
   const width = Math.max(8, Math.min(16, Math.floor((e.viewport?.columns ?? 30) / 2) - 4))
-  const others = Object.entries(all).filter(([address]) => address !== who)
+  const others = Object.entries(all).filter(([key]) => key !== who.key)
 
   const windowRow = (w: QuotaWindow, label: string) => {
     const isPast = w.resetsAt !== undefined && w.resetsAt <= now
@@ -411,15 +472,15 @@ export async function quotaSection($: EngineInterface, e: RenderInput) {
 
   return (
     <Box flexDirection="column">
-      <Text bold color="claude">Claude{who ? ` · ${who}` : ''}（目前帳號）</Text>
+      <Text bold color="claude">Claude{who.label ? ` · ${who.label}` : ''}（這個對話的帳號）</Text>
       {c.windows.length === 0 && <Text dimColor>送出一則訊息後就會顯示（僅限訂閱帳號）。</Text>}
       {c.windows.map(w => windowRow(w, LABELS[w.kind] ?? w.kind))}
       {c.contextPercent !== undefined && <Text dimColor>本對話上下文：{c.contextPercent}%</Text>}
       {c.costUsd !== undefined && <Text dimColor>本對話花費：${c.costUsd.toFixed(2)}</Text>}
 
-      {others.map(([address, reading]) => (
+      {others.map(([key, reading]) => (
         <Box marginTop={1} flexDirection="column">
-          <Text bold color="claude">Claude · {address}</Text>
+          <Text bold color="claude">Claude · {reading.label ?? key.split('|')[0]}</Text>
           {reading.windows.map(w => windowRow(w, LABELS[w.kind] ?? w.kind))}
           <Text dimColor>登入這個帳號時記下的，{span(now - reading.seenAt)}前</Text>
         </Box>

@@ -34,7 +34,7 @@ test('open items first, the field clears after Enter, finished items fold away',
   on('fs.list', () => ({ value: [] }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('http.fetch', () => ({ deny: 'offline' }))
-  on('session.authorize', () => ({ value: undefined }))
+  on('session.authorize', () => ({ value: null }))
 
   await $.command.run({ command: 'quota', args: '', origin: 'user' } as never)
 
@@ -129,7 +129,7 @@ test('items group under their ## / ### heading, a heading folds, new items stay 
   on('fs.list', () => ({ value: [] }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('http.fetch', () => ({ deny: 'offline' }))
-  on('session.authorize', () => ({ value: undefined }))
+  on('session.authorize', () => ({ value: null }))
 
   await $.command.run({ command: 'quota', args: '', origin: 'user' } as never)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
@@ -181,11 +181,11 @@ test('the first run starts todo.md from the newest daily file, whole, and leaves
     return { value: undefined }
   })
   on('fs.list', () => ({
-    value: Object.keys(files).map(path => ({ name: path.slice(DIR.length + 1), kind: 'file' as const, mtimeMs: 0 })),
+    value: Object.keys(files).map(path => ({ name: path.slice(DIR.length + 1), kind: 'file' as const, mtimeMs: 0, size: 0, isLink: false })),
   }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('http.fetch', () => ({ deny: 'offline' }))
-  on('session.authorize', () => ({ value: undefined }))
+  on('session.authorize', () => ({ value: null }))
 
   await $.command.run({ command: 'quota', args: '', origin: 'user' } as never)
 

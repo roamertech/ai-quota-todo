@@ -5,7 +5,9 @@ export type QuotaSnapshot = {
   costUsd?: number
   isLive?: boolean
 }
-export type AccountReading = { windows: QuotaWindow[]; seenAt: number }
+export type AccountReading = { windows: QuotaWindow[]; seenAt: number; label?: string }
+// key: email + organization, so a Team and a Max seat under one email stay apart; label: what the panel shows
+export type ClaudeAccount = { key: string; label: string }
 export type ChatGptSnapshot = {
   windows: QuotaWindow[]
   plan?: string
@@ -22,7 +24,7 @@ declare module 'claude-code' {
   interface PluginState {
     'ai-quota-todo': {
       claude: QuotaSnapshot
-      email: string
+      account: ClaudeAccount
       accounts: Record<string, AccountReading>
       chatgpt: ChatGptSnapshot
       tick: number
