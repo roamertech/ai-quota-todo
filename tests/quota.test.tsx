@@ -52,7 +52,7 @@ test('the seat this session holds is named with its plan, and another seat\'s sh
   on('http.fetch', (_, e) => {
     asked.push(e.url)
     if (e.url.endsWith('/api/oauth/profile')) {
-      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ organization: { organization_type: 'claude_team' } }) } }
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ organization: { organization_type: 'claude_team', rate_limit_tier: 'default_claude_max_5x' } }) } }
     }
     if (e.url.endsWith('/api/oauth/usage')) {
       return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ seven_day: { utilization: 12, resets_at: null } }) } }
@@ -63,7 +63,8 @@ test('the seat this session holds is named with its plan, and another seat\'s sh
   await $.command.run({ command: 'quota', args: '', origin: 'user' } as never)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /這個對話的帳號/ }))?.text).toContain('a@b.com · Team')
+  // A Team premium seat sits on a max_5x tier; it is still named Team.
+  expect((await ui.find({ type: 'Text', text: /這個對話的帳號/ }))?.text).toContain('a@b.com · Team（5x 額度）')
   // The Max seat's 35% was not taken; this seat asked for its own.
   expect(asked.some(u => u.endsWith('/api/oauth/usage'))).toBe(true)
   expect(await ui.find({ type: 'Text', text: /已用 12%/ })).toBeDefined()

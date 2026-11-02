@@ -171,14 +171,19 @@ async function rememberAccount($: EngineInterface) {
 }
 
 // The plan as people say it, from the organization the server reports.
+// The organization's type decides the name; the rate-limit tier only adds its multiple
+// (a Team premium seat runs on a `..._max_5x` tier, and is still Team).
 function planName(type: string | undefined, tier: string | undefined): string | undefined {
   const t = (type ?? '').toLowerCase()
-  const r = (tier ?? '').toLowerCase()
-  if (t.includes('max') || r.includes('max')) return r.includes('20x') ? 'Max 20x' : r.includes('5x') ? 'Max 5x' : 'Max'
-  if (t.includes('team')) return 'Team'
-  if (t.includes('enterprise')) return 'Enterprise'
-  if (t.includes('pro')) return 'Pro'
-  return undefined
+  const times = /(\d+)x\b/.exec((tier ?? '').toLowerCase())?.[1]
+  const plan = t.includes('team') ? 'Team'
+    : t.includes('enterprise') ? 'Enterprise'
+    : t.includes('max') ? 'Max'
+    : t.includes('pro') ? 'Pro'
+    : undefined
+  if (!plan) return times ? `${times}x` : undefined
+  if (plan === 'Max') return times ? `Max ${times}x` : 'Max'
+  return times ? `${plan}（${times}x 額度）` : plan
 }
 
 // This session's own seat, asked once with its own sign-in (one email can hold several seats).
@@ -226,7 +231,8 @@ async function detectAccount($: EngineInterface) {
     if (!mail) return
     const key = `${mail}|${org ?? ''}`
     const plan = org ? await fetchPlan($, org) : undefined
-    const label = [mail, plan ?? orgName].filter(Boolean).join(' · ')
+    // The organization's name too: two seats under one email may share a plan name.
+    const label = [mail, orgName, plan].filter(Boolean).join(' · ')
     const was = await read($, account)
     if (was.key !== key || was.label !== label) await update($, account, () => ({ key, label }))
   } catch {}
